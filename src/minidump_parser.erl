@@ -168,6 +168,10 @@ parse_stream(Directory=#minidump_directory{stream_type=stream_type_linux_proc_st
     % CPU info stream is the contents of /proc/self/status as a string.
     [{type, Directory#minidump_directory.stream_type},
      {text, extract_stream_data(Directory, Bin)}];
+parse_stream(Directory=#minidump_directory{stream_type=stream_type_linux_maps}, Bin) ->
+    % Contents of /proc/self/maps
+    [{type, Directory#minidump_directory.stream_type},
+     {text, extract_stream_data(Directory, Bin)}];
 parse_stream(Directory=#minidump_directory{stream_type=stream_type_linux_cmd_line}, Bin) ->
     % Command line that the program was started with.
     % May have trailing nulls, so strip those.
