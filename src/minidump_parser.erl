@@ -128,6 +128,20 @@ minidump_stream_type(?MINIDUMP_STREAM_LINUX_DSO_DEBUG) -> stream_type_linux_dso_
 -record(minidump_directory, {
     stream_type, stream_size, stream_rva
 }).
+-record(minidump_thread, {
+    thread_id, suspend_count, priority_class, priority, teb, stack_mem_start,
+    stack_mem_size, stack_mem_rva, thread_context_size, thread_context_rva
+}).
+-record(minidump_exception_stream, {
+    thread_id, exception_record, thread_context
+}).
+-record(minidump_exception, {
+    exception_code, exception_flags, exception_record, exception_address,
+    number_parameters, exception_information
+}).
+-record(minidump_location, {
+    size, rva
+}).
 
 parse_file(Filename) ->
     {ok, Bin} = file:read_file(Filename),
@@ -154,12 +168,92 @@ parse_file(Filename) ->
     ],
     lists:foreach(
         fun(S) ->
-            io:format("Stream: ~p~n", [S])
+            ok % io:format("Stream: ~p~n", [S])
         end,
         ParsedStreams
     ),
     ok.
 
+parse_thread_info(Bin) ->
+    <<ThreadId:?UINT32LE, SuspendCount:?UINT32LE,
+      PriorityClass:?UINT32LE, Priority:?UINT32LE,
+      Teb:?UINT64LE, StackMemStart:?UINT64LE,
+      StackMemSize:?UINT32LE, StackMemRva:?UINT32LE,
+      ThreadContextSize:?UINT32LE, ThreadContextRva:?UINT32LE,
+      Rest/binary>> = Bin,
+    #minidump_thread{
+        thread_id=ThreadId,
+        suspend_count=SuspendCount,
+        priority_class=PriorityClass,
+        priority=Priority,
+        teb=Teb,
+        stack_mem_start=StackMemStart,
+        stack_mem_size=StackMemSize,
+        stack_mem_rva=StackMemRva,
+        thread_context_size=ThreadContextSize,
+        thread_context_rva=ThreadContextRva
+    }.
+
+parse_stream(Directory=#minidump_directory{stream_type=stream_type_thread_list}, Bin) ->
+    Data = extract_stream_data(Directory, Bin),
+    <<ThreadCount:?UINT32LE, Data1/binary>> = Data,
+    io:format("Found ~p threads~n", [ThreadCount]),
+    ThreadDescriptorSize = (
+        4    % Thread ID
+        + 4  % Suspend count
+        + 4  % Priority class
+        + 4  % Priority
+        + 8  % Thread Environment Block
+        + 8  % Stack memory start address
+        + 4  % Stack memory size
+        + 4  % Stack memory RVA
+        + 4  % Thread context size
+        + 4  % Thread context RVA
+    ),
+    TotalThreadDescriptorSize = ThreadDescriptorSize * ThreadCount,
+    <<ThreadDataBinary:TotalThreadDescriptorSize/binary, Data2/binary>> = Data1,
+    ThreadData = [
+        parse_thread_info(ThreadBin)
+        || <<ThreadBin:ThreadDescriptorSize/binary>>
+        <= ThreadDataBinary
+    ],
+    lists:foreach(
+        fun(T) -> io:format("Thread: ~p~n", [T]) end,
+        ThreadData
+    ),
+    ok;
+parse_stream(Directory=#minidump_directory{stream_type=stream_type_exception}, Bin) ->
+    Data = extract_stream_data(Directory, Bin),
+    <<ThreadId:?UINT32LE, _Alignment:?UINT32LE,
+      % Minidump exception record, embedded
+      ExceptionCode:?UINT32LE, ExceptionFlags:?UINT32LE,
+      ExceptionRecord:?UINT64LE, ExceptionAddress:?UINT64LE,
+      NumberParameters:?UINT32LE, _Alignment2:?UINT32LE,
+      % Array of 15 uint64s
+      ExceptionInformationArray:120/binary,
+      % Minidump location descriptor, embedded
+      ThreadContextSize:?UINT32LE, ThreadContextRva:?UINT32LE>> = Data,
+    % Parse the exception info array
+    ExceptionInformation = [
+        E || <<E:?UINT64LE>> <= ExceptionInformationArray
+    ],
+    Stream = #minidump_exception_stream{
+        thread_id=ThreadId,
+        exception_record=#minidump_exception{
+            exception_code=ExceptionCode,
+            exception_flags=ExceptionFlags,
+            exception_record=ExceptionRecord,
+            exception_address=ExceptionAddress,
+            number_parameters=NumberParameters,
+            exception_information=ExceptionInformation
+        },
+        thread_context=#minidump_location{
+            size=ThreadContextSize,
+            rva=ThreadContextRva
+        }
+    },
+    io:format("Exception data: ~p~n", [Stream]),
+    ok;
 parse_stream(Directory=#minidump_directory{stream_type=stream_type_linux_cpu_info}, Bin) ->
     % CPU info stream is the contents of /proc/cpuinfo as a string.
     [{type, Directory#minidump_directory.stream_type},
