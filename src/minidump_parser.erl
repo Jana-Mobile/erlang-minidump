@@ -361,6 +361,58 @@ parse_stream(Directory=#minidump_directory{stream_type=StreamType}, Binary) ->
     csd_version_rva, suite_mask, cpu_info
 }).
 
+-record(minidump_linux_dso, {
+    version, map_rva, dso_count, brk, ld_base, dynamic
+}).
+
+parse_md_dso_debug_32(Data) ->
+    <<Version:?UINT32LE,
+      MapRva:?UINT32LE,
+      DsoCount:?UINT32LE,
+      Brk:?UINT32LE,
+      LdBase:?UINT32LE,
+      Dynamic:?UINT32LE>> = Data,
+    #minidump_linux_dso{
+        version=Version,
+        map_rva=MapRva,
+        dso_count=DsoCount,
+        brk=Brk,
+        ld_base=LdBase,
+        dynamic=Dynamic
+    }.
+
+parse_md_dso_debug_64(Data) ->
+    <<Version:?UINT32LE,
+      MapRva:?UINT32LE,
+      DsoCount:?UINT32LE,
+      Brk:?UINT64LE,
+      LdBase:?UINT64LE,
+      Dynamic:?UINT64LE>> = Data,
+    #minidump_linux_dso{
+        version=Version,
+        map_rva=MapRva,
+        dso_count=DsoCount,
+        brk=Brk,
+        ld_base=LdBase,
+        dynamic=Dynamic
+    }.
+
+parse_stream_binary(stream_type_linux_dso_debug, Data) ->
+    WordSize = 32,
+    ParserFun = case WordSize of
+        32 -> fun parse_md_dso_debug_32/1;
+        64 -> fun parse_md_dso_debug_64/1
+    end,
+    RecordSize = case WordSize of
+        32 -> 12 + 12;
+        64 -> 12 + 24
+    end,
+    DsoEntries = [
+        ParserFun(Record) || <<Record:RecordSize/binary>>
+        <= Data
+    ],
+    io:format("~p DSO entries loaded~n", [length(DsoEntries)]),
+    DsoEntries;
 parse_stream_binary(stream_type_system_info, Data) ->
     <<ProcessorArch:?UINT16LE,
       ProcessorLevel:?UINT16LE,
