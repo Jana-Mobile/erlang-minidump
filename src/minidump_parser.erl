@@ -515,6 +515,9 @@ parse_stream_binary(stream_type_linux_environ, Data) ->
     ],
     [{type, stream_type_linux_environ},
      {map, EnvVarsProplist}];
+parse_stream_binary(stream_type_unused, _Data) ->
+    % Reserved.
+    undefined;
 parse_stream_binary(Type, _Data) ->
     io:format("Can't parse stream type ~p yet~n", [Type]),
     [{type, Type}].
