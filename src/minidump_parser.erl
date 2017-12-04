@@ -1,8 +1,12 @@
 -module(minidump_parser).
 -compile(export_all).
 
+% Macros for decoding 32/64bit unsigned integers
 -define(UINT32LE, 4/little-unsigned-integer-unit:8).
 -define(UINT64LE, 8/little-unsigned-integer-unit:8).
+
+% Sized of various structs
+-define(MDVSFIXEDFILEINFOSIZE, 52).
 
 -define(MINIDUMP_TYPE_NORMAL, 16#00000000).
 -define(MINIDUMP_TYPE_WITH_DATA_SEGS, 16#00000001).
@@ -205,6 +209,75 @@ parse_thread_info(Bin) ->
         thread_context_rva=ThreadContextRva
     }.
 
+-record(minidump_module, {
+    base_of_image, size_of_image, checksum, time_date_stamp, module_name_rva,
+    version_info, cv_record, misc_record
+}).
+
+-record(minidump_vs_fixed_file_info, {
+    signature, struct_version, file_version_hi, file_version_lo,
+    product_version_hi, product_version_lo,
+    file_flags_mask, file_flags, file_os, file_type, file_subtype,
+    file_date_hi, file_date_lo
+}).
+
+parse_vs_fixedfileinfo(Binary) ->
+    <<Signature:?UINT32LE,
+      StructVersion:?UINT32LE,
+      FileVersionHi:?UINT32LE,
+      FileVersionLo:?UINT32LE,
+      ProductVersionHi:?UINT32LE,
+      ProductVersionLo:?UINT32LE,
+      FileFlagsMask:?UINT32LE,
+      FileFlags:?UINT32LE,
+      FileOs:?UINT32LE,
+      FileType:?UINT32LE,
+      FileSubtype:?UINT32LE,
+      FileDateHi:?UINT32LE,
+      FileDateLo:?UINT32LE>> = Binary,
+    #minidump_vs_fixed_file_info{
+        signature=Signature,
+        struct_version=StructVersion,
+        file_version_hi=FileVersionHi,
+        file_version_lo=FileVersionLo,
+        product_version_hi=ProductVersionHi,
+        product_version_lo=ProductVersionLo,
+        file_flags_mask=FileFlagsMask,
+        file_flags=FileFlags,
+        file_os=FileOs,
+        file_type=FileType,
+        file_subtype=FileSubtype,
+        file_date_hi=FileDateHi,
+        file_date_lo=FileDateLo
+    }.
+
+parse_md_module(Binary) ->
+    <<BaseOfImage:?UINT64LE,
+      SizeOfImage:?UINT32LE,
+      Checksum:?UINT32LE,
+      TimeDateStamp:?UINT32LE,
+      ModuleNameRva:?UINT32LE,
+      VersionInfo:?MDVSFIXEDFILEINFOSIZE/binary,
+      CvRecordSize:?UINT32LE, CvRecordRva:?UINT32LE,
+      MiscRecordSize:?UINT32LE, MiscRecordRva:?UINT32LE,
+      _Reserved0:?UINT64LE, _Reserved1:?UINT64LE>> = Binary,
+    #minidump_module{
+        base_of_image=BaseOfImage,
+        size_of_image=SizeOfImage,
+        checksum=Checksum,
+        time_date_stamp=TimeDateStamp,
+        module_name_rva=ModuleNameRva,
+        version_info=parse_vs_fixedfileinfo(VersionInfo),
+        cv_record=#minidump_location{
+            size=CvRecordSize,
+            rva=CvRecordRva
+        },
+        misc_record=#minidump_location{
+            size=MiscRecordSize,
+            rva=MiscRecordRva
+        }
+    }.
+
 parse_stream(Directory=#minidump_directory{stream_type=stream_type_thread_list}, Bin) ->
     Data = extract_stream_data(Directory, Bin),
     <<ThreadCount:?UINT32LE, Data1/binary>> = Data,
@@ -228,10 +301,6 @@ parse_stream(Directory=#minidump_directory{stream_type=stream_type_thread_list},
         || <<ThreadBin:ThreadDescriptorSize/binary>>
         <= ThreadDataBinary
     ],
-    lists:foreach(
-        fun(T) -> io:format("Thread: ~p~n", [T]) end,
-        ThreadData
-    ),
     ok;
 parse_stream(Directory=#minidump_directory{stream_type=stream_type_exception}, Bin) ->
     Data = extract_stream_data(Directory, Bin),
@@ -268,6 +337,18 @@ parse_stream(Directory=#minidump_directory{stream_type=stream_type_exception}, B
         ThreadId
     ]),
     Stream;
+parse_stream(Directory=#minidump_directory{stream_type=stream_type_module_list}, Bin) ->
+    Data = extract_stream_data(Directory, Bin),
+    <<ModuleCount:?UINT32LE, Data1/binary>> = Data,
+    MDModuleSize = 108,
+    ModuleDataSize = MDModuleSize * ModuleCount,
+    <<ModuleData:ModuleDataSize/binary, _Data2/binary>> = Data1,
+    MDModules = [
+        parse_md_module(ModBin) || <<ModBin:MDModuleSize/binary>>
+        <= ModuleData
+    ],
+    io:format("~p modules loaded~n", [length(MDModules)]),
+    MDModules;
 parse_stream(Directory=#minidump_directory{stream_type=stream_type_linux_cpu_info}, Bin) ->
     % CPU info stream is the contents of /proc/cpuinfo as a string.
     [{type, Directory#minidump_directory.stream_type},
@@ -338,8 +419,6 @@ parse_minidump_directories(Header=#minidump_header{stream_directory_rva=Rva}, Bi
 
     % Extract the directory binary data
     <<DirectoryData:TotalDirectorySize/binary, Rest2/binary>> = Rest1,
-
-    io:format("Directory data: ~p~n", [DirectoryData]),
 
     % Parse each of the directories
     Directories = [
