@@ -278,8 +278,11 @@ parse_md_module(Binary) ->
         }
     }.
 
-parse_stream(Directory=#minidump_directory{stream_type=stream_type_thread_list}, Bin) ->
-    Data = extract_stream_data(Directory, Bin),
+parse_stream(Directory=#minidump_directory{stream_type=StreamType}, Binary) ->
+    Data = extract_stream_data(Directory, Binary),
+    parse_stream_binary(StreamType, Data).
+
+parse_stream_binary(stream_type_thread_list, Data) ->
     <<ThreadCount:?UINT32LE, Data1/binary>> = Data,
     io:format("Found ~p threads~n", [ThreadCount]),
     ThreadDescriptorSize = (
@@ -302,8 +305,7 @@ parse_stream(Directory=#minidump_directory{stream_type=stream_type_thread_list},
         <= ThreadDataBinary
     ],
     ok;
-parse_stream(Directory=#minidump_directory{stream_type=stream_type_exception}, Bin) ->
-    Data = extract_stream_data(Directory, Bin),
+parse_stream_binary(stream_type_exception, Data) ->
     <<ThreadId:?UINT32LE, _Alignment:?UINT32LE,
       % Minidump exception record, embedded
       ExceptionCode:?UINT32LE, ExceptionFlags:?UINT32LE,
@@ -337,8 +339,7 @@ parse_stream(Directory=#minidump_directory{stream_type=stream_type_exception}, B
         ThreadId
     ]),
     Stream;
-parse_stream(Directory=#minidump_directory{stream_type=stream_type_module_list}, Bin) ->
-    Data = extract_stream_data(Directory, Bin),
+parse_stream_binary(stream_type_module_list, Data) ->
     <<ModuleCount:?UINT32LE, Data1/binary>> = Data,
     MDModuleSize = 108,
     ModuleDataSize = MDModuleSize * ModuleCount,
@@ -349,43 +350,36 @@ parse_stream(Directory=#minidump_directory{stream_type=stream_type_module_list},
     ],
     io:format("~p modules loaded~n", [length(MDModules)]),
     MDModules;
-parse_stream(Directory=#minidump_directory{stream_type=stream_type_linux_cpu_info}, Bin) ->
+parse_stream_binary(stream_type_linux_cpu_info, Data) ->
     % CPU info stream is the contents of /proc/cpuinfo as a string.
-    [{type, Directory#minidump_directory.stream_type},
-     {text, extract_stream_data(Directory, Bin)}];
-parse_stream(Directory=#minidump_directory{stream_type=stream_type_linux_proc_status}, Bin) ->
+    [{type, stream_type_linux_cpu_info},
+     {text, Data}];
+parse_stream_binary(stream_type_linux_proc_status, Data) ->
     % CPU info stream is the contents of /proc/self/status as a string.
-    [{type, Directory#minidump_directory.stream_type},
-     {text, extract_stream_data(Directory, Bin)}];
-parse_stream(Directory=#minidump_directory{stream_type=stream_type_linux_maps}, Bin) ->
+    [{type, stream_type_linux_proc_status},
+     {text, Data}];
+parse_stream_binary(stream_type_linux_maps, Data) ->
     % Contents of /proc/self/maps
-    [{type, Directory#minidump_directory.stream_type},
-     {text, extract_stream_data(Directory, Bin)}];
-parse_stream(Directory=#minidump_directory{stream_type=stream_type_linux_cmd_line}, Bin) ->
+    [{type, stream_type_linux_maps},
+     {text, Data}];
+parse_stream_binary(stream_type_linux_cmd_line, Data) ->
     % Command line that the program was started with.
     % May have trailing nulls, so strip those.
-    Cmdline = hd(binary:split(
-        extract_stream_data(Directory, Bin),
-        <<0>>
-    )),
-    [{type, Directory#minidump_directory.stream_type},
+    Cmdline = hd(binary:split(Data, <<0>>)),
+    [{type, stream_type_linux_cmd_line},
      {text, Cmdline}];
-parse_stream(Directory=#minidump_directory{stream_type=stream_type_linux_auxv}, Bin) ->
+parse_stream_binary(stream_type_linux_auxv, Data) ->
     % Auxiliary vector. Contains some OS specific information.
     % List of ulong keys and ulong values.
     Auxv = [
         {Key, Value} || <<Key:?UINT64LE, Value:?UINT64LE>>
-        <= extract_stream_data(Directory, Bin)
+        <= Data
     ],
-    [{type, Directory#minidump_directory.stream_type},
+    [{type, stream_type_linux_auxv},
      {map, Auxv}];
-parse_stream(Directory=#minidump_directory{stream_type=stream_type_linux_environ}, Bin) ->
+parse_stream_binary(stream_type_linux_environ, Data) ->
     % Environment variables, delimited by the null byte.
-    EnvVars = binary:split(
-        extract_stream_data(Directory, Bin),
-        <<0>>,
-        [global]
-    ),
+    EnvVars = binary:split(Data, <<0>>, [global]),
     % Convert them to a proplist
     EnvVarsProplist = [
         {Key, Value} || [Key, Value]
@@ -393,9 +387,9 @@ parse_stream(Directory=#minidump_directory{stream_type=stream_type_linux_environ
             binary:split(Var, <<"=">>) || Var <- EnvVars
         ]
     ],
-    [{type, Directory#minidump_directory.stream_type},
+    [{type, stream_type_linux_environ},
      {map, EnvVarsProplist}];
-parse_stream(#minidump_directory{stream_type=Type}, _Bin) ->
+parse_stream_binary(Type, _Data) ->
     io:format("Can't parse stream type ~p yet~n", [Type]),
     [{type, Type}].
 
