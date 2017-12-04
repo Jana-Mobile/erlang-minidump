@@ -157,6 +157,19 @@ signal_name(15) -> sigterm.
 -record(minidump_location, {
     size, rva
 }).
+-record(minidump_memory_descriptor, {
+    start_of_memory_range, memory
+}).
+-record(minidump_module, {
+    base_of_image, size_of_image, checksum, time_date_stamp, module_name_rva,
+    version_info, cv_record, misc_record
+}).
+-record(minidump_vs_fixed_file_info, {
+    signature, struct_version, file_version_hi, file_version_lo,
+    product_version_hi, product_version_lo,
+    file_flags_mask, file_flags, file_os, file_type, file_subtype,
+    file_date_hi, file_date_lo
+}).
 
 parse_file(Filename) ->
     {ok, Bin} = file:read_file(Filename),
@@ -208,18 +221,6 @@ parse_thread_info(Bin) ->
         thread_context_size=ThreadContextSize,
         thread_context_rva=ThreadContextRva
     }.
-
--record(minidump_module, {
-    base_of_image, size_of_image, checksum, time_date_stamp, module_name_rva,
-    version_info, cv_record, misc_record
-}).
-
--record(minidump_vs_fixed_file_info, {
-    signature, struct_version, file_version_hi, file_version_lo,
-    product_version_hi, product_version_lo,
-    file_flags_mask, file_flags, file_os, file_type, file_subtype,
-    file_date_hi, file_date_lo
-}).
 
 parse_vs_fixedfileinfo(Binary) ->
     <<Signature:?UINT32LE,
@@ -278,10 +279,39 @@ parse_md_module(Binary) ->
         }
     }.
 
+
+parse_minidump_memory_descriptor(Data) ->
+    <<StartOfMemoryRange:?UINT64LE,
+      MemorySize:?UINT32LE,
+      MemoryRva:?UINT32LE>> = Data,
+    #minidump_memory_descriptor{
+        start_of_memory_range=StartOfMemoryRange,
+        memory=#minidump_location{
+            size=MemorySize,
+            rva=MemoryRva
+        }
+    }.
+
 parse_stream(Directory=#minidump_directory{stream_type=StreamType}, Binary) ->
     Data = extract_stream_data(Directory, Binary),
     parse_stream_binary(StreamType, Data).
 
+parse_stream_binary(stream_type_memory_list, Data) ->
+    <<MemoryRangeCount:?UINT32LE, Data1/binary>> = Data,
+    MinidumpMemoryDescriptorSize = (
+        8    % Start of memory range
+        + 4  % Embedded location datasize
+        + 4  % Embedded location RVA
+    ),
+    TotalMemoryDescriptorSize = MemoryRangeCount * MinidumpMemoryDescriptorSize,
+    <<MemoryDescriptorData:TotalMemoryDescriptorSize/binary, _Rest/binary>> = Data1,
+    MemoryRanges = [
+        parse_minidump_memory_descriptor(MDData)
+        || <<MDData:MinidumpMemoryDescriptorSize/binary>>
+        <= MemoryDescriptorData
+    ],
+    io:format("~p memory ranges loaded~n", [length(MemoryRanges)]),
+    MemoryRanges;
 parse_stream_binary(stream_type_thread_list, Data) ->
     <<ThreadCount:?UINT32LE, Data1/binary>> = Data,
     io:format("Found ~p threads~n", [ThreadCount]),
@@ -298,13 +328,13 @@ parse_stream_binary(stream_type_thread_list, Data) ->
         + 4  % Thread context RVA
     ),
     TotalThreadDescriptorSize = ThreadDescriptorSize * ThreadCount,
-    <<ThreadDataBinary:TotalThreadDescriptorSize/binary, Data2/binary>> = Data1,
+    <<ThreadDataBinary:TotalThreadDescriptorSize/binary, _/binary>> = Data1,
     ThreadData = [
         parse_thread_info(ThreadBin)
         || <<ThreadBin:ThreadDescriptorSize/binary>>
         <= ThreadDataBinary
     ],
-    ok;
+    ThreadData;
 parse_stream_binary(stream_type_exception, Data) ->
     <<ThreadId:?UINT32LE, _Alignment:?UINT32LE,
       % Minidump exception record, embedded
