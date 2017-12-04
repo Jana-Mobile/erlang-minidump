@@ -2,6 +2,8 @@
 -compile(export_all).
 
 % Macros for decoding 32/64bit unsigned integers
+-define(UINT8, 1/little-unsigned-integer-unit:8).
+-define(UINT16LE, 2/little-unsigned-integer-unit:8).
 -define(UINT32LE, 4/little-unsigned-integer-unit:8).
 -define(UINT64LE, 8/little-unsigned-integer-unit:8).
 
@@ -73,6 +75,18 @@
 -define(MINIDUMP_STREAM_LINUX_AUXV, 16#47670008).
 -define(MINIDUMP_STREAM_LINUX_MAPS, 16#47670009).
 -define(MINIDUMP_STREAM_LINUX_DSO_DEBUG, 16#4767000A).
+
+-define(CPU_ARCHITECTURE_x86, 0).
+-define(CPU_ARCHITECTURE_MIPS, 1).
+-define(CPU_ARCHITECTURE_ALPHA, 2).
+-define(CPU_ARCHITECTURE_PPC, 3).
+-define(CPU_ARCHITECTURE_SHX, 4).
+-define(CPU_ARCHITECTURE_ARM, 5).
+-define(CPU_ARCHITECTURE_IA64, 6).
+-define(CPU_ARCHITECTURE_ALPHA64, 7).
+-define(CPU_ARCHITECTURE_MSIL, 8).
+-define(CPU_ARCHITECTURE_AMD64, 9).
+-define(CPU_ARCHITECTURE_X86_WIN64, 10).
 
 minidump_type(?MINIDUMP_TYPE_NORMAL) -> minidump_type_normal;
 minidump_type(?MINIDUMP_TYPE_WITH_DATA_SEGS) -> minidump_type_with_data_segs;
@@ -169,6 +183,16 @@ signal_name(15) -> sigterm.
     product_version_hi, product_version_lo,
     file_flags_mask, file_flags, file_os, file_type, file_subtype,
     file_date_hi, file_date_lo
+}).
+-record(minidump_cpu_info_x86, {
+    vendor_id_0, vendor_id_1, vendor_id_2,
+    version_info, feature_info, extended_features
+}).
+-record(minidump_cpu_info_arm, {
+    cpu_id, elf_hw_caps
+}).
+-record(minidump_cpu_info_other, {
+    features_0, features_1
 }).
 
 parse_file(Filename) ->
@@ -292,10 +316,82 @@ parse_minidump_memory_descriptor(Data) ->
         }
     }.
 
+
+parse_md_cpu_info(?CPU_ARCHITECTURE_x86, Bin) ->
+    <<VendorId0:?UINT32LE,
+      VendorId1:?UINT32LE,
+      VendorId2:?UINT32LE,
+      VersionInfo:?UINT32LE,
+      FeatureInfo:?UINT32LE,
+      ExtendedFeatures:?UINT32LE,
+      _Rest/binary>> = Bin,
+    #minidump_cpu_info_x86{
+        vendor_id_0=VendorId0,
+        vendor_id_1=VendorId1,
+        vendor_id_2=VendorId2,
+        version_info=VersionInfo,
+        feature_info=FeatureInfo,
+        extended_features=ExtendedFeatures
+    };
+parse_md_cpu_info(?CPU_ARCHITECTURE_ARM, Bin) ->
+    <<CpuId:?UINT32LE,
+      ElfHwcaps:?UINT32LE,
+      _Rest/binary>> = Bin,
+    #minidump_cpu_info_arm{
+        cpu_id=CpuId,
+        elf_hw_caps=ElfHwcaps
+    };
+parse_md_cpu_info(_, Bin) ->
+    <<ProcessorFeatures0:?UINT64LE,
+      ProcessorFeatures1:?UINT64LE,
+      _Rest/binary>> = Bin,
+    #minidump_cpu_info_other{
+        features_0=ProcessorFeatures0,
+        features_1=ProcessorFeatures1
+    }.
+
 parse_stream(Directory=#minidump_directory{stream_type=StreamType}, Binary) ->
     Data = extract_stream_data(Directory, Binary),
     parse_stream_binary(StreamType, Data).
 
+-record(minidump_system_info, {
+    processor_arch, processor_level, processor_revision, processor_count,
+    product_type, os_major_version, os_minor_version,
+    os_build_number, os_platform_id,
+    csd_version_rva, suite_mask, cpu_info
+}).
+
+parse_stream_binary(stream_type_system_info, Data) ->
+    <<ProcessorArch:?UINT16LE,
+      ProcessorLevel:?UINT16LE,
+      ProcessorRevision:?UINT16LE,
+      ProcessorCount:?UINT8,
+      ProductType:?UINT8,
+      OsMajorVersion:?UINT32LE,
+      OsMinorVersion:?UINT32LE,
+      OsBuildNumber:?UINT32LE,
+      OsPlatformId:?UINT32LE,
+      CSDVersionRva:?UINT32LE,
+      SuiteMask:?UINT16LE,
+      _Reserved:?UINT16LE,
+      CpuInfoBin/binary>> = Data,
+    CpuInfo = parse_md_cpu_info(ProcessorArch, CpuInfoBin),
+    SystemInfo=#minidump_system_info{
+        processor_arch=ProcessorArch,
+        processor_level=ProcessorLevel,
+        processor_revision=ProcessorRevision,
+        processor_count=ProcessorCount,
+        product_type=ProductType,
+        os_major_version=OsMajorVersion,
+        os_minor_version=OsMinorVersion,
+        os_build_number=OsBuildNumber,
+        os_platform_id=OsPlatformId,
+        csd_version_rva=CSDVersionRva,
+        suite_mask=SuiteMask,
+        cpu_info=CpuInfo
+    },
+    io:format("System info: ~p~n", [SystemInfo]),
+    SystemInfo;
 parse_stream_binary(stream_type_memory_list, Data) ->
     <<MemoryRangeCount:?UINT32LE, Data1/binary>> = Data,
     MinidumpMemoryDescriptorSize = (
