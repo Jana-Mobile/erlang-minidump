@@ -121,6 +121,17 @@ minidump_stream_type(?MINIDUMP_STREAM_LINUX_AUXV) -> stream_type_linux_auxv;
 minidump_stream_type(?MINIDUMP_STREAM_LINUX_MAPS) -> stream_type_linux_maps;
 minidump_stream_type(?MINIDUMP_STREAM_LINUX_DSO_DEBUG) -> stream_type_linux_dso_debug.
 
+signal_name(1) -> sighup;
+signal_name(2) -> sigint;
+signal_name(3) -> sigquit;
+signal_name(4) -> sigill;
+signal_name(6) -> sigabrt;
+signal_name(8) -> sigfpe;
+signal_name(9) -> sigkill;
+signal_name(11) -> sigsev;
+signal_name(13) -> sigpipe;
+signal_name(15) -> sigterm.
+
 -record(minidump_header, {
     signature, version, stream_count, stream_directory_rva, checksum,
     time_date_stamp, flags
@@ -252,8 +263,11 @@ parse_stream(Directory=#minidump_directory{stream_type=stream_type_exception}, B
             rva=ThreadContextRva
         }
     },
-    io:format("Exception data: ~p~n", [Stream]),
-    ok;
+    io:format("Thread was killed by signal ~p in thread ~p~n", [
+        signal_name(ExceptionCode),
+        ThreadId
+    ]),
+    Stream;
 parse_stream(Directory=#minidump_directory{stream_type=stream_type_linux_cpu_info}, Bin) ->
     % CPU info stream is the contents of /proc/cpuinfo as a string.
     [{type, Directory#minidump_directory.stream_type},
