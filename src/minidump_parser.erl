@@ -350,9 +350,62 @@ parse_md_cpu_info(_, Bin) ->
         features_1=ProcessorFeatures1
     }.
 
+-record(minidump_raw_context_arm, {
+    context_flags, registers, status_register, floating_point_registers,
+    floating_point_status_register, floating_point_extra
+}).
+
+parse_md_raw_context_arm(Binary) ->
+    RegisterCount = 16,
+    TotalRegisterSize = 4 * RegisterCount,
+    FPRegCount = 32,
+    TotalFPRegSize = 8 * FPRegCount,
+    FPExtraCount = 8,
+    TotalExtraSize = 4 * FPExtraCount,
+    <<ContextFlags:?UINT32LE,
+      RegisterData:TotalRegisterSize/binary,
+      CPSR:?UINT32LE,
+      FPSCR:?UINT64LE,
+      FPRegs:TotalFPRegSize/binary,
+      FPExtraBin:TotalExtraSize/binary
+    >> = Binary,
+    Registers = [
+        R || <<R:?UINT32LE>> <= RegisterData
+    ],
+    FPRegisters = [
+        R || <<R:64/float-little>> <= FPRegs
+    ],
+    FPExtra = [
+        R || <<R:?UINT32LE>> <= FPExtraBin
+    ],
+    #minidump_raw_context_arm{
+        context_flags=ContextFlags,
+        registers=Registers,
+        status_register=CPSR,
+        floating_point_registers=FPRegisters,
+        floating_point_status_register=FPSCR,
+        floating_point_extra=FPExtra
+    }.
+
 parse_stream(Directory=#minidump_directory{stream_type=StreamType}, Binary) ->
     Data = extract_stream_data(Directory, Binary),
-    parse_stream_binary(StreamType, Data).
+    Stream = parse_stream_binary(StreamType, Data),
+    case Stream of
+        #minidump_exception_stream{
+        thread_context=#minidump_location{
+            size=ThreadContextSize,
+            rva=ThreadContextRva
+        }
+    } ->
+        <<_Ignored:ThreadContextRva/binary,
+          Context:ThreadContextSize/binary,
+          _Rest/binary>> = Binary,
+        io:format("Thread contxt: ~p~n", [Context]),
+            ok;
+        _ ->
+            ok
+    end,
+    Stream.
 
 -record(minidump_system_info, {
     processor_arch, processor_level, processor_revision, processor_count,
@@ -482,6 +535,16 @@ parse_stream_binary(stream_type_thread_list, Data) ->
         || <<ThreadBin:ThreadDescriptorSize/binary>>
         <= ThreadDataBinary
     ],
+    lists:foreach(
+        fun(Thread) ->
+            case Thread#minidump_thread.thread_id of
+                15539 ->
+                    io:format("Crashing thread: ~p~n", [Thread]);
+                _  -> ok
+            end
+        end,
+        ThreadData
+    ),
     ThreadData;
 parse_stream_binary(stream_type_exception, Data) ->
     <<ThreadId:?UINT32LE, _Alignment:?UINT32LE,
@@ -516,6 +579,7 @@ parse_stream_binary(stream_type_exception, Data) ->
         signal_name(ExceptionCode),
         ThreadId
     ]),
+    io:format("Exception data: ~p~n", [Stream]),
     Stream;
 parse_stream_binary(stream_type_module_list, Data) ->
     <<ModuleCount:?UINT32LE, Data1/binary>> = Data,
