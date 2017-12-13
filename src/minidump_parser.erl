@@ -135,7 +135,7 @@ parse_file(State, Filename) ->
         MinidumpDirectories
     ),
     ParsedStreams = [
-        parse_stream(State1, Directory, Bin) || Directory <- MinidumpDirectories
+        parse_stream(State1, Directory) || Directory <- MinidumpDirectories
     ],
     lists:foreach(
         fun(S) ->
@@ -324,19 +324,14 @@ parse_md_raw_context_arm(Binary) ->
         floating_point_extra=FPExtra
     }.
 
-parse_stream(State, Directory=#minidump_directory{stream_type=StreamType}, Binary) ->
-    Data = extract_stream_data(Directory, Binary),
+parse_stream(State, Directory=#minidump_directory{stream_type=StreamType}) ->
+    Data = extract_stream_data(State, Directory),
     Stream = parse_stream_binary(State, StreamType, Data),
     case Stream of
         #minidump_exception_stream{
-        thread_context=#minidump_location{
-            size=ThreadContextSize,
-            rva=ThreadContextRva
-        }
+        thread_context=Location
     } ->
-        <<_Ignored:ThreadContextRva/binary,
-          Context:ThreadContextSize/binary,
-          _Rest/binary>> = Binary,
+        Context = extract_binary(State, Location),
         ArmCtx = parse_md_raw_context_arm(Context),
         print_minidump_context(ArmCtx),
             ok;
@@ -654,11 +649,17 @@ parse_stream_binary(State, Type, _Data) ->
     io:format("Can't parse stream type ~p yet~n", [Type]),
     [{type, Type}].
 
-extract_stream_data(Directory, Bin) ->
+extract_stream_data(State=#state{}, Directory=#minidump_directory{}) ->
     Rva = Directory#minidump_directory.stream_rva,
     Size = Directory#minidump_directory.stream_size,
-    <<_Ignored:Rva/binary, Stream:Size/binary, _Rest/binary>> = Bin,
-    Stream.
+    extract_binary(State, Rva, Size).
+
+extract_binary(State=#state{}, #minidump_location{rva=Rva, size=Size}) ->
+    extract_binary(State, Rva, Size).
+
+extract_binary(#state{raw_data=Data}, Rva, Size) ->
+    <<_Skip:Rva/binary, Value:Size/binary, _Rest/binary>> = Data,
+    Value.
 
 parse_minidump_directories(Header=#minidump_header{stream_directory_rva=Rva}, Bin) ->
     % Trim off the directory RVA to get the start of the directories
