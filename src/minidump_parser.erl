@@ -392,7 +392,7 @@ scan_for_return_address(State, MemoryBin, MemoryStartAddress, LastSp) ->
             ),
             io:format(
                 "    sp = 0x~.16b, pc = 0x~.16b~n",
-                [LastSp, IP]
+                [LastSp + 4, IP]
             ),
             {found, LastSp, IP, Module};
         false ->
