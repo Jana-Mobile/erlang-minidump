@@ -21,12 +21,42 @@
 start_link(Filename) ->
     gen_server:start_link(?MODULE, [Filename], []).
 
+get_func_with_offset(Pid, Offset) ->
+    gen_server:call(Pid, {get_func, Offset}).
+
+get_file_by_number(Pid, Number) ->
+    gen_server:call(Pid, {get_file, Number}).
+
+get_symbol_with_offset(Pid, Offset) ->
+    gen_server:call(Pid, {get_public, Offset}).
+
 %% Callbacks
 
 init([Filename]) ->
     gen_server:cast(self(), {parse, Filename}),
     {ok, #state{}}.
 
+handle_call({get_func, Offset}, _From, State) ->
+    FuncEts = State#state.func_ets,
+    Func = case ets:lookup(FuncEts, Offset) of
+        [] -> not_found;
+        [F|_] -> {ok, F}
+    end,
+    {reply, Func, State};
+handle_call({get_file, Number}, _From, State) ->
+    FileEts = State#state.file_ets,
+    File = case ets:lookup(FileEts, Number) of
+        [] -> not_found;
+        [F|_] -> {ok, F}
+    end,
+    {reply, File, State};
+handle_call({get_public, Offset}, _From, State) ->
+    PublicEts = State#state.public_ets,
+    Sym = case ets:lookup(PublicEts, Offset) of
+        [] -> not_found;
+        [S|_] -> {ok, S}
+    end,
+    {reply, Sym, State};
 handle_call(Request, From, State) ->
     lager:info("Call ~p From ~p", [Request, From]),
     {reply, ignored, State}.
