@@ -149,7 +149,6 @@ parse_file(State, Filename) ->
     [CrashedThread] = [
         T || T <- element(2, ThreadListStream), element(2, T) =:= 15539
     ],
-    io:format("Crashed thread: ~p~n", [CrashedThread]),
     StackRva = CrashedThread#minidump_thread.stack_mem_rva,
     StackSize = CrashedThread#minidump_thread.stack_mem_size,
     <<_Ignored:StackRva/binary, StackData:StackSize/binary, _Rest/binary>> = Bin,
@@ -375,6 +374,18 @@ print_minidump_context(ArmCtx=#minidump_raw_context_arm{}) ->
     Registers = ArmCtx#minidump_raw_context_arm.registers,
     print_registers(Registers).
 
+cv_record_to_guid(<<"LEpB", DebugId/binary>>) ->
+    % This uses a really weird packing, since it's reinterpreting an ELF
+    % style record (BpEL header) into a MSGUID struct
+    <<D1:?UINT32LE, D2:?UINT16LE, D3:?UINT16LE, DR/binary>> = DebugId,
+    list_to_binary(lists:flatten(
+        io_lib:format("~8.16.0B~4.16.0B~4.16.0B~s", [
+            D1, D2, D3,
+            [io_lib:format("~2.16.0B",[X]) || <<X:8>> <= DR]
+        ])
+    ));
+cv_record_to_guid(_) -> <<"unknown">>.
+
 scan_for_return_address(State, MemoryBin, MemoryStartAddress, LastSp) ->
     % io:format("Last stack pointer: 0x~.16b~n", [LastSp]),
     % io:format("Memory address base: 0x~.16b~n", [MemoryStartAddress]),
@@ -383,12 +394,14 @@ scan_for_return_address(State, MemoryBin, MemoryStartAddress, LastSp) ->
     case instruction_address_seems_valid(State, IP) of
         {true, Module} ->
             ModuleName = extract_module_name(State#state.raw_data, Module#minidump_module.module_name_rva),
+            CodeViewData = extract_binary(State, Module#minidump_module.cv_record),
+            ModuleVersion = cv_record_to_guid(CodeViewData),
             ModuleNameDecoded = unicode:characters_to_binary(ModuleName, {utf16, little}),
             % Not sure why I'm off by 2 here...
             ModuleOffset = IP - Module#minidump_module.base_of_image - 2,
             io:format(
-                "[frame] ~s + 0x~.16b~n",
-                [ModuleNameDecoded, ModuleOffset]
+                "[frame] ~s|~s + 0x~.16b~n",
+                [ModuleNameDecoded, ModuleVersion, ModuleOffset]
             ),
             io:format(
                 "    sp = 0x~.16b, pc = 0x~.16b~n",
@@ -470,7 +483,6 @@ parse_stream_binary(State, stream_type_linux_dso_debug, Data) ->
         ParserFun(Record) || <<Record:RecordSize/binary>>
         <= Data
     ],
-    io:format("~p DSO entries loaded~n", [length(DsoEntries)]),
     DsoEntries;
 parse_stream_binary(State, stream_type_system_info, Data) ->
     <<ProcessorArch:?UINT16LE,
@@ -501,7 +513,6 @@ parse_stream_binary(State, stream_type_system_info, Data) ->
         suite_mask=SuiteMask,
         cpu_info=CpuInfo
     },
-    io:format("System info: ~p~n", [SystemInfo]),
     SystemInfo;
 parse_stream_binary(State, stream_type_memory_list, Data) ->
     <<MemoryRangeCount:?UINT32LE, Data1/binary>> = Data,
@@ -585,7 +596,6 @@ parse_stream_binary(State, stream_type_exception, Data) ->
         signal_name(ExceptionCode),
         ThreadId
     ]),
-    io:format("Exception data: ~p~n", [Stream]),
     Stream;
 parse_stream_binary(State, stream_type_module_list, Data) ->
     ModuleEts = State#state.module_ets,
