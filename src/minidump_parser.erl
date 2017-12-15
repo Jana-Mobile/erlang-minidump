@@ -1,47 +1,94 @@
 -module(minidump_parser).
--compile(export_all).
 -behaviour(gen_server).
 -include_lib("stdlib/include/ms_transform.hrl").
 -include("include/records.hrl").
 
+-export([
+    parse_file/1,
+    parse_binary/1,
+    close/1,
+    get_crashing_thread_id/1,
+    get_streams_of_type/2,
+    get_thread_by_id/2
+]).
+
+% gen_server callbacks
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    terminate/2,
+    code_change/3
+]).
+
 -record(state, {
     raw_data,
     minidump_header,
+    streams,  % Parsed minidump streams
     text_data_ets, % Ets table for raw text streams, like /proc info
     module_ets % List of modules, indexed by image base
 }).
 
 %% Public API
 
-start_link(Filename) ->
-    gen_server:start_link(?MODULE, [Filename], []).
+parse_file(Filename) ->
+    gen_server:start_link(?MODULE, [{file, Filename}], []).
+
+parse_binary(Binary) when is_binary(Binary) ->
+    gen_server:start_link(?MODULE, [{binary, Binary}], []).
+
+close(Pid) when is_pid(Pid) ->
+    gen_server:call(Pid, close).
+
+get_crashing_thread_id(Pid) when is_pid(Pid) ->
+    gen_server:call(Pid, get_crashing_thread_id).
+
+get_streams_of_type(Pid, StreamType) when is_pid(Pid) ->
+    gen_server:call(Pid, {get_streams_of_type, StreamType}).
+
+get_thread_by_id(Pid, ThreadId) when is_pid(Pid) and is_integer(ThreadId) ->
+    gen_server:call(Pid, {get_thread_by_id, ThreadId}).
 
 %% Callbacks
 
-init([Filename]) ->
-    gen_server:cast(self(), {parse, Filename}),
+init([{file, Filename}]) ->
+    gen_server:cast(self(), {parse_file, Filename}),
+    {ok, #state{}};
+init([{binary, Binary}]) ->
+    gen_server:cast(self(), {parse_binary, Binary}),
     {ok, #state{}}.
 
-handle_call(Request, From, State) ->
-    lager:info("Call ~p From ~p", [Request, From]),
+handle_call(close, _From, State) ->
+    {stop, normal, ok, State};
+handle_call(get_crashing_thread_id, _From, State) ->
+    CrashedThreadId = get_crashing_thread_id_impl(State),
+    {reply, CrashedThreadId, State};
+handle_call({get_streams_of_type, Type}, _From, State) ->
+    Streams = get_streams_of_type_impl(State, Type),
+    {reply, Streams, State};
+handle_call({get_thread_by_id, ThreadId}, _From, State) ->
+    Thread = get_thread_by_id_impl(State, ThreadId),
+    {reply, Thread, State};
+handle_call(_Request, _From, State) ->
     {reply, ignored, State}.
 
-handle_cast({parse, Filename}, State) ->
+handle_cast({parse_file, Filename}, State) ->
     State1 = parse_file(State, Filename),
     {noreply, State1};
-handle_cast(Msg, State) ->
-    lager:info("Cast ~p", [Msg]),
+handle_cast({parse_binary, Binary}, State) ->
+    State1 = parse_binary(State, Binary),
+    {noreply, State1};
+handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info(Info, State) ->
-    lager:info("Info ~p", [Info]),
+handle_info(_Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, _State) ->
     ok.
 
-code_change(OldVsn, State, _Extra) ->
-    lager:info("~p updated from vsn ~p", [?MODULE, OldVsn]),
+code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 %% Implementation
@@ -110,39 +157,56 @@ signal_name(15) -> sigterm.
 
 parse_file(State, Filename) ->
     {ok, Bin} = file:read_file(Filename),
-    {Header, Rest} = parse_header(Bin),
+    parse_binary(State, Bin).
+
+parse_binary(State, Bin) ->
+    Header = parse_header(Bin),
     State1 = State#state{
         raw_data=Bin,
         minidump_header=Header,
         text_data_ets=ets:new(text_data, [set]),
         module_ets=ets:new(modules, [set, {keypos, 2}])
     },
-    io:format("~p streams detected~n", [Header#minidump_header.stream_count]),
-    io:format("Header: ~p~n", [Header]),
-    io:format("Flags: 0x~.16B: ~p~n", [
-        Header#minidump_header.flags,
-        sets:to_list(parse_flags(Header#minidump_header.flags))
-    ]),
     MinidumpDirectories = parse_minidump_directories(Header, Bin),
-    io:format("Stream data: ~n"),
-    lists:foreach(
-        fun(D) ->
-            io:format("Stream type: ~p size ~p~n", [
-                D#minidump_directory.stream_type,
-                D#minidump_directory.stream_size
-            ])
-        end,
-        MinidumpDirectories
-    ),
     ParsedStreams = [
         parse_stream(State1, Directory) || Directory <- MinidumpDirectories
     ],
-    lists:foreach(
-        fun(S) ->
-            ok %io:format("Stream type: ~p~n", [S])
-        end,
-        ParsedStreams
-    ),
+    State1#state{
+        streams=ParsedStreams
+    }.
+
+-spec get_crashing_thread_id_impl(#state{}) -> {error, any()} | {ok, pos_integer()}.
+get_crashing_thread_id_impl(State) ->
+    case get_streams_of_type_impl(State, stream_type_exception) of
+        [] ->
+            {error, no_exception_data_stream};
+        [ExnStream|_] ->
+            ExnStreamData = ExnStream#minidump_stream.stream_data,
+            {ok, ExnStreamData#minidump_exception_stream.thread_id}
+    end.
+
+-spec get_streams_of_type_impl(#state{}, atom()) -> [#minidump_stream{}].
+get_streams_of_type_impl(State, StreamType) ->
+    [Stream || Stream <- State#state.streams,
+               Stream#minidump_stream.stream_type =:= StreamType].
+
+-spec get_thread_by_id_impl(#state{}, pos_integer()) -> {error, any()} | {ok, #minidump_thread{}}.
+get_thread_by_id_impl(State, ThreadId) ->
+    case get_streams_of_type_impl(State, stream_type_thread_list) of
+        [] -> {error, missing_thread_list_stream};
+        [Stream|_] ->
+            PossibleThread = [
+                Thread || Thread <- Stream#minidump_stream.stream_data,
+                          Thread#minidump_thread.thread_id =:= ThreadId
+            ],
+            case PossibleThread of
+                [] -> {error, not_found};
+                [Thread|_] -> {ok, Thread}
+            end
+    end.
+
+print_stackinfo(State, ParsedStreams) ->
+    Bin = State#state.raw_data,
     [ThreadListStream] = [
         S || S <- ParsedStreams, is_tuple(S), element(1, S) =:= thread_list
     ],
@@ -154,8 +218,7 @@ parse_file(State, Filename) ->
     <<_Ignored:StackRva/binary, StackData:StackSize/binary, _Rest/binary>> = Bin,
     StackMemStart = CrashedThread#minidump_thread.stack_mem_start,
     StackPointer = binary_to_integer(<<"ffb55c90">>, 16),
-    scan_stack_repeatedly(State1, StackData, StackMemStart, StackPointer, 30),
-    State1.
+    scan_stack_repeatedly(State, StackData, StackMemStart, StackPointer, 30).
 
 scan_stack_repeatedly(State, Stack, StackStart, StackPointer, 0) ->
     ok;
@@ -325,20 +388,7 @@ parse_md_raw_context_arm(Binary) ->
 
 parse_stream(State, Directory=#minidump_directory{stream_type=StreamType}) ->
     Data = extract_stream_data(State, Directory),
-    Stream = parse_stream_binary(State, StreamType, Data),
-    case Stream of
-        #minidump_exception_stream{
-        thread_context=Location
-    } ->
-        Context = extract_binary(State, Location),
-        ArmCtx = parse_md_raw_context_arm(Context),
-        print_minidump_context(ArmCtx),
-            ok;
-        _ ->
-            ok
-    end,
-    Stream.
-
+    parse_stream_binary(State, StreamType, Data).
 
 register_name(?MD_CONTEXT_ARM_REG_FP) -> <<"fp">>;
 register_name(?MD_CONTEXT_ARM_REG_SP) -> <<"sp">>;
@@ -387,8 +437,6 @@ cv_record_to_guid(<<"LEpB", DebugId/binary>>) ->
 cv_record_to_guid(_) -> <<"unknown">>.
 
 scan_for_return_address(State, MemoryBin, MemoryStartAddress, LastSp) ->
-    % io:format("Last stack pointer: 0x~.16b~n", [LastSp]),
-    % io:format("Memory address base: 0x~.16b~n", [MemoryStartAddress]),
     Offset = LastSp - MemoryStartAddress,
     <<_:Offset/binary, IP:?UINT32LE, _/binary>> = MemoryBin,
     case instruction_address_seems_valid(State, IP) of
@@ -469,7 +517,9 @@ parse_md_dso_debug_64(Data) ->
         dynamic=Dynamic
     }.
 
-parse_stream_binary(State, stream_type_linux_dso_debug, Data) ->
+-spec parse_stream_binary(#state{}, atom(), binary()) -> #minidump_stream{}.
+parse_stream_binary(_State, stream_type_linux_dso_debug, Data) ->
+    % Ought to be 32 for all our dumps
     WordSize = 32,
     ParserFun = case WordSize of
         32 -> fun parse_md_dso_debug_32/1;
@@ -483,8 +533,11 @@ parse_stream_binary(State, stream_type_linux_dso_debug, Data) ->
         ParserFun(Record) || <<Record:RecordSize/binary>>
         <= Data
     ],
-    DsoEntries;
-parse_stream_binary(State, stream_type_system_info, Data) ->
+    #minidump_stream{
+        stream_type=stream_type_linux_dso_debug,
+        stream_data=DsoEntries
+    };
+parse_stream_binary(_State, stream_type_system_info, Data) ->
     <<ProcessorArch:?UINT16LE,
       ProcessorLevel:?UINT16LE,
       ProcessorRevision:?UINT16LE,
@@ -513,8 +566,11 @@ parse_stream_binary(State, stream_type_system_info, Data) ->
         suite_mask=SuiteMask,
         cpu_info=CpuInfo
     },
-    SystemInfo;
-parse_stream_binary(State, stream_type_memory_list, Data) ->
+    #minidump_stream{
+        stream_type=stream_type_system_info,
+        stream_data=SystemInfo
+    };
+parse_stream_binary(_State, stream_type_memory_list, Data) ->
     <<MemoryRangeCount:?UINT32LE, Data1/binary>> = Data,
     MinidumpMemoryDescriptorSize = (
         8    % Start of memory range
@@ -528,11 +584,12 @@ parse_stream_binary(State, stream_type_memory_list, Data) ->
         || <<MDData:MinidumpMemoryDescriptorSize/binary>>
         <= MemoryDescriptorData
     ],
-    io:format("~p memory ranges loaded~n", [length(MemoryRanges)]),
-    MemoryRanges;
-parse_stream_binary(State, stream_type_thread_list, Data) ->
+    #minidump_stream{
+        stream_type=stream_type_memory_list,
+        stream_data=MemoryRanges
+    };
+parse_stream_binary(_State, stream_type_thread_list, Data) ->
     <<ThreadCount:?UINT32LE, Data1/binary>> = Data,
-    io:format("Found ~p threads~n", [ThreadCount]),
     ThreadDescriptorSize = (
         4    % Thread ID
         + 4  % Suspend count
@@ -552,18 +609,11 @@ parse_stream_binary(State, stream_type_thread_list, Data) ->
         || <<ThreadBin:ThreadDescriptorSize/binary>>
         <= ThreadDataBinary
     ],
-    lists:foreach(
-        fun(Thread) ->
-            case Thread#minidump_thread.thread_id of
-                15539 ->
-                    io:format("Crashing thread: ~p~n", [Thread]);
-                _  -> ok
-            end
-        end,
-        ThreadData
-    ),
-    {thread_list, ThreadData};
-parse_stream_binary(State, stream_type_exception, Data) ->
+    #minidump_stream{
+        stream_type=stream_type_thread_list,
+        stream_data=ThreadData
+    };
+parse_stream_binary(_State, stream_type_exception, Data) ->
     <<ThreadId:?UINT32LE, _Alignment:?UINT32LE,
       % Minidump exception record, embedded
       ExceptionCode:?UINT32LE, ExceptionFlags:?UINT32LE,
@@ -592,11 +642,10 @@ parse_stream_binary(State, stream_type_exception, Data) ->
             rva=ThreadContextRva
         }
     },
-    io:format("Thread was killed by signal ~p in thread ~p~n", [
-        signal_name(ExceptionCode),
-        ThreadId
-    ]),
-    Stream;
+    #minidump_stream{
+        stream_type=stream_type_exception,
+        stream_data=Stream
+    };
 parse_stream_binary(State, stream_type_module_list, Data) ->
     ModuleEts = State#state.module_ets,
     <<ModuleCount:?UINT32LE, Data1/binary>> = Data,
@@ -611,36 +660,48 @@ parse_stream_binary(State, stream_type_module_list, Data) ->
         fun(Module) -> ets:insert(ModuleEts, Module) end,
         MDModules
     ),
-    io:format("~p modules loaded~n", [length(MDModules)]),
-    MDModules;
-parse_stream_binary(State, stream_type_linux_cpu_info, Data) ->
+    #minidump_stream{
+        stream_type=stream_type_module_list,
+        stream_data=MDModules
+    };
+parse_stream_binary(_State, stream_type_linux_cpu_info, Data) ->
     % CPU info stream is the contents of /proc/cpuinfo as a string.
-    [{type, stream_type_linux_cpu_info},
-     {text, Data}];
-parse_stream_binary(State, stream_type_linux_proc_status, Data) ->
+    #minidump_stream{
+        stream_type=stream_type_linux_cpu_info,
+        stream_data=Data
+    };
+parse_stream_binary(_State, stream_type_linux_proc_status, Data) ->
     % CPU info stream is the contents of /proc/self/status as a string.
-    [{type, stream_type_linux_proc_status},
-     {text, Data}];
-parse_stream_binary(State, stream_type_linux_maps, Data) ->
+    #minidump_stream{
+        stream_type=stream_type_linux_proc_status,
+        stream_data=Data
+    };
+parse_stream_binary(_State, stream_type_linux_maps, Data) ->
     % Contents of /proc/self/maps
-    [{type, stream_type_linux_maps},
-     {text, Data}];
-parse_stream_binary(State, stream_type_linux_cmd_line, Data) ->
+    #minidump_stream{
+        stream_type=stream_type_linux_maps,
+        stream_data=Data
+    };
+parse_stream_binary(_State, stream_type_linux_cmd_line, Data) ->
     % Command line that the program was started with.
     % May have trailing nulls, so strip those.
     Cmdline = hd(binary:split(Data, <<0>>)),
-    [{type, stream_type_linux_cmd_line},
-     {text, Cmdline}];
-parse_stream_binary(State, stream_type_linux_auxv, Data) ->
+    #minidump_stream{
+        stream_type=stream_type_linux_cmd_line,
+        stream_data=Cmdline
+    };
+parse_stream_binary(_State, stream_type_linux_auxv, Data) ->
     % Auxiliary vector. Contains some OS specific information.
     % List of ulong keys and ulong values.
     Auxv = [
         {Key, Value} || <<Key:?UINT64LE, Value:?UINT64LE>>
         <= Data
     ],
-    [{type, stream_type_linux_auxv},
-     {map, Auxv}];
-parse_stream_binary(State, stream_type_linux_environ, Data) ->
+    #minidump_stream{
+        stream_type=stream_type_linux_auxv,
+        stream_data=Auxv
+    };
+parse_stream_binary(_State, stream_type_linux_environ, Data) ->
     % Environment variables, delimited by the null byte.
     EnvVars = binary:split(Data, <<0>>, [global]),
     % Convert them to a proplist
@@ -650,14 +711,15 @@ parse_stream_binary(State, stream_type_linux_environ, Data) ->
             binary:split(Var, <<"=">>) || Var <- EnvVars
         ]
     ],
-    [{type, stream_type_linux_environ},
-     {map, EnvVarsProplist}];
-parse_stream_binary(State, stream_type_unused, _Data) ->
+    #minidump_stream{
+        stream_type=stream_type_linux_environ,
+        stream_data=EnvVarsProplist
+    };
+parse_stream_binary(_State, stream_type_unused, _Data) ->
     % Reserved.
-    undefined;
-parse_stream_binary(State, Type, _Data) ->
-    io:format("Can't parse stream type ~p yet~n", [Type]),
-    [{type, Type}].
+    #minidump_stream{
+        stream_type=stream_type_unused
+    }.
 
 extract_stream_data(State=#state{}, Directory=#minidump_directory{}) ->
     Rva = Directory#minidump_directory.stream_rva,
@@ -704,7 +766,6 @@ parse_flags(Flags, [Flag|Flags1], Set) ->
     case Flags band Flag of
         0 -> parse_flags(Flags, Flags1, Set);
         _ ->
-            io:format("It's a match~n"),
             parse_flags(
                 Flags,
                 Flags1,
@@ -716,8 +777,8 @@ parse_flags(Flags, [Flag|Flags1], Set) ->
 parse_header(Bin) ->
     <<Signature:?UINT32LE, Version:?UINT32LE, StreamCount:?UINT32LE,
       StreamDirectoryRVA:?UINT32LE, Checksum:?UINT32LE,
-      TimeDateStamp:?UINT32LE, Flags:?UINT64LE, Rest/binary>> = Bin,
-    {#minidump_header{
+      TimeDateStamp:?UINT32LE, Flags:?UINT64LE, _Rest/binary>> = Bin,
+    #minidump_header{
         signature=Signature,
         version=Version,
         stream_count=StreamCount,
@@ -725,5 +786,4 @@ parse_header(Bin) ->
         checksum=Checksum,
         time_date_stamp=TimeDateStamp,
         flags=Flags
-    }, Rest}.
-
+    }.
