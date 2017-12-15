@@ -101,6 +101,10 @@
 
 -record(minidump_stream, {stream_type, stream_data}).
 
+-record(stack_frame, {
+    instruction_pointer, module_name, module_version, module_offset
+}).
+
 -record(minidump_thread, {
     thread_id, suspend_count, priority_class, priority, teb, stack_mem_start,
     stack_mem_size, stack_mem_rva, thread_context_size, thread_context_rva

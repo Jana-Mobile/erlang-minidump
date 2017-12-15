@@ -9,7 +9,8 @@
     close/1,
     get_crashing_thread_id/1,
     get_streams_of_type/2,
-    get_thread_by_id/2
+    get_thread_by_id/2,
+    get_stack_for_thread/2
 ]).
 
 % gen_server callbacks
@@ -50,6 +51,9 @@ get_streams_of_type(Pid, StreamType) when is_pid(Pid) ->
 get_thread_by_id(Pid, ThreadId) when is_pid(Pid) and is_integer(ThreadId) ->
     gen_server:call(Pid, {get_thread_by_id, ThreadId}).
 
+get_stack_for_thread(Pid, ThreadId) when is_pid(Pid) and is_integer(ThreadId) ->
+    gen_server:call(Pid, {get_stack_for_thread, ThreadId}).
+
 %% Callbacks
 
 init([{file, Filename}]) ->
@@ -70,6 +74,8 @@ handle_call({get_streams_of_type, Type}, _From, State) ->
 handle_call({get_thread_by_id, ThreadId}, _From, State) ->
     Thread = get_thread_by_id_impl(State, ThreadId),
     {reply, Thread, State};
+handle_call({get_stack_for_thread, ThreadId}, _From, State) ->
+    {reply, get_stack_for_thread_impl(State, ThreadId), State};
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.
 
@@ -205,6 +211,36 @@ get_thread_by_id_impl(State, ThreadId) ->
             end
     end.
 
+get_stack_for_thread_impl(State, ThreadId) ->
+    case get_thread_by_id_impl(State, ThreadId) of
+        {error, Reason} -> {error, Reason};
+        {ok, Thread} ->
+            StackPage = extract_binary(
+                State,
+                Thread#minidump_thread.stack_mem_rva,
+                Thread#minidump_thread.stack_mem_size
+            ),
+            StackMemStart = Thread#minidump_thread.stack_mem_start,
+            ThreadContext = get_thread_context_impl(State, Thread),
+            StackPointer = get_register_from_context(ThreadContext, ?MD_CONTEXT_ARM_REG_SP),
+            io:format("Stack pointer: ~.16b~n", [StackPointer]),
+            StackFrames = stack_to_list(
+                State, StackPage, StackMemStart, StackPointer
+            ),
+            {ok, StackFrames}
+    end.
+
+get_register_from_context(#minidump_raw_context_arm{registers=Registers}, Register) ->
+    lists:nth(Register + 1, Registers).
+
+get_thread_context_impl(State, Thread=#minidump_thread{}) ->
+    ThreadContextBin = extract_binary(
+        State,
+        Thread#minidump_thread.thread_context_rva,
+        Thread#minidump_thread.thread_context_size
+    ),
+    parse_md_raw_context_arm(ThreadContextBin).
+
 print_stackinfo(State, ParsedStreams) ->
     Bin = State#state.raw_data,
     [ThreadListStream] = [
@@ -218,17 +254,31 @@ print_stackinfo(State, ParsedStreams) ->
     <<_Ignored:StackRva/binary, StackData:StackSize/binary, _Rest/binary>> = Bin,
     StackMemStart = CrashedThread#minidump_thread.stack_mem_start,
     StackPointer = binary_to_integer(<<"ffb55c90">>, 16),
-    scan_stack_repeatedly(State, StackData, StackMemStart, StackPointer, 30).
+    stack_to_list(State, StackData, StackMemStart, StackPointer, 30).
 
-scan_stack_repeatedly(State, Stack, StackStart, StackPointer, 0) ->
-    ok;
-scan_stack_repeatedly(State, Stack, StackStart, StackPointer, MaxDepth) ->
-    case scan_for_return_address(State, Stack, StackStart, StackPointer) of
-        {found, Sp, Ip, Module} ->
-            scan_stack_repeatedly(State, Stack, StackStart, Sp+4, MaxDepth-1);
-        _ ->
-            ok
-    end.
+stack_to_list(State, Stack, StackStart, StackPointer) ->
+    stack_to_list(State, Stack, StackStart, StackPointer, 30).
+stack_to_list(State, Stack, StackStart, StackPointer, Depth) ->
+    stack_to_list(State, Stack, StackStart, StackPointer, Depth, []).
+stack_to_list(State, Stack, StackStart, StackPointer, 0, Acc) ->
+    lists:reverse(Acc);
+stack_to_list(State, Stack, StackStart, StackPointer, MaxDepth, Acc) ->
+    {found, Sp, Ip, Module} = scan_for_return_address(
+        State, Stack, StackStart, StackPointer
+    ),
+    ModuleName = extract_module_name(State#state.raw_data, Module#minidump_module.module_name_rva),
+    CodeViewData = extract_binary(State, Module#minidump_module.cv_record),
+    ModuleVersion = cv_record_to_guid(CodeViewData),
+    ModuleNameDecoded = unicode:characters_to_binary(ModuleName, {utf16, little}),
+    % Not sure why I'm off by 2 here...
+    ModuleOffset = Ip - Module#minidump_module.base_of_image - 2,
+    Frame = #stack_frame{
+        instruction_pointer=Ip,
+        module_name=ModuleNameDecoded,
+        module_version=ModuleVersion,
+        module_offset=ModuleOffset
+    },
+    stack_to_list(State, Stack, StackStart, Sp+4, MaxDepth-1, [Frame|Acc]).
 
 parse_thread_info(Bin) ->
     <<ThreadId:?UINT32LE, SuspendCount:?UINT32LE,
@@ -441,20 +491,6 @@ scan_for_return_address(State, MemoryBin, MemoryStartAddress, LastSp) ->
     <<_:Offset/binary, IP:?UINT32LE, _/binary>> = MemoryBin,
     case instruction_address_seems_valid(State, IP) of
         {true, Module} ->
-            ModuleName = extract_module_name(State#state.raw_data, Module#minidump_module.module_name_rva),
-            CodeViewData = extract_binary(State, Module#minidump_module.cv_record),
-            ModuleVersion = cv_record_to_guid(CodeViewData),
-            ModuleNameDecoded = unicode:characters_to_binary(ModuleName, {utf16, little}),
-            % Not sure why I'm off by 2 here...
-            ModuleOffset = IP - Module#minidump_module.base_of_image - 2,
-            io:format(
-                "[frame] ~s|~s + 0x~.16b~n",
-                [ModuleNameDecoded, ModuleVersion, ModuleOffset]
-            ),
-            io:format(
-                "    sp = 0x~.16b, pc = 0x~.16b~n",
-                [LastSp + 4, IP]
-            ),
             {found, LastSp, IP, Module};
         false ->
             scan_for_return_address(State, MemoryBin, MemoryStartAddress, LastSp + 4)
