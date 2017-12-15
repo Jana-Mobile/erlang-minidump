@@ -1,0 +1,13 @@
+{application, minidump,
+ [
+  {description, "Minidump parser"},
+  {vsn, "1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib,
+                  sasl
+                 ]},
+  {mod, { minidump_app, []}},
+  {env, []}
+ ]}.
