@@ -223,11 +223,27 @@ get_stack_for_thread_impl(State, ThreadId) ->
             StackMemStart = Thread#minidump_thread.stack_mem_start,
             ThreadContext = get_thread_context_impl(State, Thread),
             StackPointer = get_register_from_context(ThreadContext, ?MD_CONTEXT_ARM_REG_SP),
-            io:format("Stack pointer: ~.16b~n", [StackPointer]),
+            InstructionPointer = get_register_from_context(ThreadContext, ?MD_CONTEXT_ARM_REG_PC),
+
+            % Get the top level frame manually
+            FirstFrameModule = hd(modules_with_address(State, InstructionPointer)),
+            FirstFrameModuleName = extract_module_name(
+                State#state.raw_data,
+                FirstFrameModule#minidump_module.module_name_rva
+            ),
+            CodeViewData = extract_binary(State, FirstFrameModule#minidump_module.cv_record),
+            FirstFrameModuleVersion = cv_record_to_guid(CodeViewData),
+            FirstFrame = #stack_frame{
+                instruction_pointer=InstructionPointer,
+                module_name=FirstFrameModuleName,
+                module_version=FirstFrameModuleVersion,
+                module_offset=InstructionPointer-FirstFrameModule#minidump_module.base_of_image-2
+            },
+
             StackFrames = stack_to_list(
                 State, StackPage, StackMemStart, StackPointer
             ),
-            {ok, StackFrames}
+            {ok, [FirstFrame|StackFrames]}
     end.
 
 get_register_from_context(#minidump_raw_context_arm{registers=Registers}, Register) ->
