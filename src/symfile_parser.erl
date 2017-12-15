@@ -1,6 +1,8 @@
 -module(symfile_parser).
 -compile(export_all).
 -behaviour(gen_server).
+-include_lib("stdlib/include/ms_transform.hrl").
+-define(TIMEOUT, 10000).
 
 -export([start_link/1]).
 
@@ -22,13 +24,13 @@ start_link(Filename) ->
     gen_server:start_link(?MODULE, [Filename], []).
 
 get_func_with_offset(Pid, Offset) ->
-    gen_server:call(Pid, {get_func, Offset}).
+    gen_server:call(Pid, {get_func, Offset}, ?TIMEOUT).
 
 get_file_by_number(Pid, Number) ->
-    gen_server:call(Pid, {get_file, Number}).
+    gen_server:call(Pid, {get_file, Number}, ?TIMEOUT).
 
 get_symbol_with_offset(Pid, Offset) ->
-    gen_server:call(Pid, {get_public, Offset}).
+    gen_server:call(Pid, {get_public, Offset}, ?TIMEOUT).
 
 %% Callbacks
 
@@ -37,8 +39,7 @@ init([Filename]) ->
     {ok, #state{}}.
 
 handle_call({get_func, Offset}, _From, State) ->
-    FuncEts = State#state.func_ets,
-    Func = case ets:lookup(FuncEts, Offset) of
+    Func = case get_func_with_offset_impl(State, Offset) of
         [] -> not_found;
         [F|_] -> {ok, F}
     end,
@@ -51,8 +52,7 @@ handle_call({get_file, Number}, _From, State) ->
     end,
     {reply, File, State};
 handle_call({get_public, Offset}, _From, State) ->
-    PublicEts = State#state.public_ets,
-    Sym = case ets:lookup(PublicEts, Offset) of
+    Sym = case get_public_with_offset_impl(State, Offset) of
         [] -> not_found;
         [S|_] -> {ok, S}
     end,
@@ -85,15 +85,55 @@ parse_file(State=#state{}, Filename) ->
     {ok, Bin} = file:read_file(Filename),
     State1 = State#state{
         file_ets=ets:new(file, [set]),
-        func_ets=ets:new(func, [set]),
+        func_ets=ets:new(func, [set, {keypos, 2}]),
         func_line_ets=ets:new(func_line_ets, [set]),
         stack_ets=ets:new(stack, [set]),
-        public_ets=ets:new(public, [set])
+        public_ets=ets:new(public, [set, {keypos, 2}])
     },
     Lines = binary:split(Bin, <<"\n">>, [global]),
     parse_lines(State1, Lines),
-    io:format("Loaded ~p symbol lines~n", [length(Lines)]),
     State1.
+
+-record(symfile_func, {offset, size, param_size, name}).
+-record(symfile_public, {offset, name}).
+
+get_func_with_offset_impl(State, Offset) ->
+    % Select all modules with a base address <= Address
+    PotentialFuncs = ets:select(
+        State#state.func_ets,
+        ets:fun2ms(fun(F=#symfile_func{offset=Base}) when Base =< Offset -> F end)
+    ),
+
+    % Filter the list to just modules where base + size >= Address, or
+    % all modules that contain the address
+    _ContainingFuncs = [
+        M || M=#symfile_func{offset=Base, size=Size}
+        <- PotentialFuncs, Base + Size > Offset
+    ].
+
+get_public_with_offset_impl(State, Offset) ->
+    % Select all public records with a base offset <= Offset
+    Potentials = ets:select(
+        State#state.public_ets,
+        ets:fun2ms(fun(F=#symfile_public{offset=Base}) when Base =< Offset -> F end)
+    ),
+
+    case Potentials of
+        [] -> [];
+        _ ->
+            % We don't really have a size for publics, so take the highest one
+            Lowest = lists:foldl(
+                fun(S1=#symfile_public{offset=O1}, S2=#symfile_public{offset=O2}) ->
+                    case O1 > O2 of
+                        true -> S1;
+                        false -> S2
+                    end
+                end,
+                hd(Potentials),
+                Potentials
+            ),
+            [Lowest]
+    end.
 
 % Expected prefixes:
 % PUBLIC <extern_offset> 0 <name>
@@ -112,7 +152,6 @@ parse_lines(State, [Line|Lines]) ->
 
 parse_line(State, <<>>) -> State;
 parse_line(State=#state{}, <<"MODULE ", ModuleData/binary>>) ->
-    io:format("Module: ~p~n", [ModuleData]),
     [Os, Cpu, Uuid, ModuleName] = binary:split(ModuleData, <<" ">>, [global]),
     State#state{
         module_os=Os,
@@ -134,13 +173,13 @@ parse_line(State=#state{func_ets=Ets}, <<"FUNC ", Data/binary>>) ->
     Offset = binary_to_integer(OffsetHex, 16),
     Size = binary_to_integer(SizeHex, 16),
     ParamSize = binary_to_integer(ParamSizeHex, 16),
-    ets:insert(Ets, {Offset, Size, ParamSize, FuncName}),
+    ets:insert(Ets, #symfile_func{offset=Offset, size=Size, param_size=ParamSize, name=FuncName}),
     State;
 parse_line(State=#state{public_ets=Ets}, <<"PUBLIC ", Data/binary>>) ->
     [OffsetHex, Data1] = binary:split(Data, <<" ">>),
     [_, Name] = binary:split(Data1, <<" ">>),
     Offset = binary_to_integer(OffsetHex, 16),
-    ets:insert(Ets, {Offset, Name}),
+    ets:insert(Ets, #symfile_public{offset=Offset, name=Name}),
     State;
 parse_line(State=#state{stack_ets=Ets}, <<"STACK CFI INIT ", Data/binary>>) ->
     [OffsetHex, Data1] = binary:split(Data, <<" ">>),
