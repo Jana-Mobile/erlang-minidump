@@ -1,8 +1,10 @@
 -module(symfile_server).
--compile(export_all).
 -behaviour(gen_server).
 
--export([start_link/1]).
+-export([
+    start_link/1,
+    symbols_for_file_hash/3
+]).
 
 -export([init/1,
          handle_call/3,
