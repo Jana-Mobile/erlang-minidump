@@ -495,7 +495,7 @@ cv_record_to_guid(<<"LEpB", DebugId/binary>>) ->
     % style record (BpEL header) into a MSGUID struct
     <<D1:?UINT32LE, D2:?UINT16LE, D3:?UINT16LE, DR/binary>> = DebugId,
     list_to_binary(lists:flatten(
-        io_lib:format("~8.16.0B~4.16.0B~4.16.0B0~s", [
+        io_lib:format("~8.16.0B~4.16.0B~4.16.0B~s0", [
             D1, D2, D3,
             [io_lib:format("~2.16.0B",[X]) || <<X:8>> <= DR]
         ])
