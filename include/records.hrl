@@ -90,6 +90,9 @@
 -define(MD_CONTEXT_ARM_REG_LR, 14).
 -define(MD_CONTEXT_ARM_REG_PC, 15).
 
+-record(symfile_func, {offset, size, param_size, name}).
+-record(symfile_public, {offset, name}).
+
 -record(minidump_header, {
     signature, version, stream_count, stream_directory_rva, checksum,
     time_date_stamp, flags

@@ -94,9 +94,6 @@ parse_file(State=#state{}, Filename) ->
     parse_lines(State1, Lines),
     State1.
 
--record(symfile_func, {offset, size, param_size, name}).
--record(symfile_public, {offset, name}).
-
 get_func_with_offset_impl(State, Offset) ->
     % Select all modules with a base address <= Address
     PotentialFuncs = ets:select(
