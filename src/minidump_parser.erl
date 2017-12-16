@@ -227,9 +227,12 @@ get_stack_for_thread_impl(State, ThreadId) ->
 
             % Get the top level frame manually
             FirstFrameModule = hd(modules_with_address(State, InstructionPointer)),
-            FirstFrameModuleName = extract_module_name(
+            FirstFrameModuleNameUnicode = extract_module_name(
                 State#state.raw_data,
                 FirstFrameModule#minidump_module.module_name_rva
+            ),
+            FirstFrameModuleName = unicode:characters_to_binary(
+                FirstFrameModuleNameUnicode, {utf16, little}
             ),
             CodeViewData = extract_binary(State, FirstFrameModule#minidump_module.cv_record),
             FirstFrameModuleVersion = cv_record_to_guid(CodeViewData),
