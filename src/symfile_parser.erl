@@ -16,7 +16,8 @@
 
 -record(state, {
     file_ets, func_ets, func_line_ets, stack_ets, public_ets,
-    code_id, module_os, module_cpu, module_uuid, module_name
+    code_id, module_os, module_cpu, module_uuid, module_name,
+    symbol_offset_cache
 }).
 
 %% Public API
@@ -37,7 +38,9 @@ get_symbol_with_offset(Pid, Offset) ->
 
 init([Filename]) ->
     gen_server:cast(self(), {parse, Filename}),
-    {ok, #state{}}.
+    {ok, #state{
+        symbol_offset_cache=#{}
+    }}.
 
 handle_call({get_func, Offset}, _From, State) ->
     Func = case get_func_with_offset_impl(State, Offset) of
@@ -53,11 +56,22 @@ handle_call({get_file, Number}, _From, State) ->
     end,
     {reply, File, State};
 handle_call({get_public, Offset}, _From, State) ->
-    Sym = case get_public_with_offset_impl(State, Offset) of
-        [] -> not_found;
-        [S|_] -> {ok, S}
+    % Check if we already know this one
+    {State1, Sym} = case maps:get(Offset, State#state.symbol_offset_cache, not_found) of
+        not_found ->
+            Result = case get_public_with_offset_impl(State, Offset) of
+                [] -> not_found;
+                [S|_] -> {ok, S}
+            end,
+            NewState = State#state{
+                symbol_offset_cache=maps:put(
+                    Offset, Result, State#state.symbol_offset_cache
+                )
+            },
+            {NewState, Result};
+        Cached -> {State, Cached}
     end,
-    {reply, Sym, State};
+    {reply, Sym, State1};
 handle_call(Request, From, State) ->
     lager:info("Call ~p From ~p", [Request, From]),
     {reply, ignored, State}.
