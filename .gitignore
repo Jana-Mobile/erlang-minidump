@@ -1,3 +1,4 @@
 *.beam
 *.dump
 rebar.lock
+_build/

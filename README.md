@@ -1,11 +1,7 @@
 # Minidump parser for Erlang
 
-Been working on this when blocked on other tasks, with the eventual goal
-of integrating it into the hprof-relay so that it can expose more useful
-info as json, to be loaded into snowflake and queried.
-
-The basic file parsing is more or less complete, and what remains is to
-construct meaningful stack traces from the stream contents.
+Simple file parsers for the Minidump format, as described by
+[MSDN](https://msdn.microsoft.com/en-us/library/windows/desktop/ms680378(v=vs.85).aspx)
 
 ## How to run
 
@@ -131,3 +127,18 @@ You will need [rebar3](https://www.rebar3.org/)
          #stack_frame{...},
          {...}|...]}
 
+## License
+
+Copyright 2017 Jana Mobile, Inc.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
