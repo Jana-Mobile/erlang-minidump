@@ -3,6 +3,7 @@
 
 -export([
     start_link/1,
+    start_link/2,
     symbols_for_file_hash/3
 ]).
 
@@ -15,6 +16,7 @@
 
 -record(state, {
     symfile_dir,
+    public_only = false :: boolean(),
     parser_contexts,
     keys_by_pid
 }).
@@ -22,7 +24,10 @@
 %% Public API
 
 start_link(SymfileDir) ->
-    gen_server:start_link(?MODULE, [SymfileDir], []).
+    start_link(SymfileDir, false).
+
+start_link(SymfileDir, PublicOnly) ->
+    gen_server:start_link(?MODULE, [SymfileDir, PublicOnly], []).
 
 % Load all files in the symbol file directory
 symbols_for_file_hash(Pid, Filename, Hash) ->
@@ -30,11 +35,12 @@ symbols_for_file_hash(Pid, Filename, Hash) ->
 
 %% Callbacks
 
-init([SymfileDir]) ->
+init([SymfileDir, PublicOnly]) ->
     % Trap exit so we can remove terminated children
     process_flag(trap_exit, true),
     {ok, #state{
         symfile_dir=SymfileDir,
+        public_only=PublicOnly,
         parser_contexts=#{},
         keys_by_pid=#{}
     }}.
@@ -106,7 +112,7 @@ load_file_hash(State, Filename, Hash) ->
     case filelib:is_file(Symfile) of
         false -> {State, not_found};
         true ->
-            {ok, Pid} = symfile_parser:start_link(Symfile),
+            {ok, Pid} = symfile_parser:start_link(Symfile, State#state.public_only),
             State1 = State#state{
                 parser_contexts=maps:put(
                     {Filename, Hash},

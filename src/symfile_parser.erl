@@ -5,7 +5,10 @@
 -include("include/records.hrl").
 -define(TIMEOUT, 10000).
 
--export([start_link/1]).
+-export([
+    start_link/1,
+    start_link/2
+]).
 
 -export([init/1,
          handle_call/3,
@@ -15,6 +18,7 @@
          code_change/3]).
 
 -record(state, {
+    public_syms_only = false :: boolean(),
     file_ets, func_ets, func_line_ets, stack_ets, public_ets,
     code_id, module_os, module_cpu, module_uuid, module_name,
     symbol_offset_cache
@@ -23,7 +27,10 @@
 %% Public API
 
 start_link(Filename) ->
-    gen_server:start_link(?MODULE, [Filename], []).
+    start_link(Filename, false).
+
+start_link(Filename, PublicOnly) ->
+    gen_server:start_link(?MODULE, [Filename, PublicOnly], []).
 
 get_func_with_offset(Pid, Offset) ->
     gen_server:call(Pid, {get_func, Offset}, ?TIMEOUT).
@@ -36,9 +43,10 @@ get_symbol_with_offset(Pid, Offset) ->
 
 %% Callbacks
 
-init([Filename]) ->
+init([Filename, PublicOnly]) ->
     gen_server:cast(self(), {parse, Filename}),
     {ok, #state{
+        public_syms_only=PublicOnly,
         symbol_offset_cache=#{}
     }}.
 
@@ -173,12 +181,12 @@ parse_line(State=#state{}, <<"MODULE ", ModuleData/binary>>) ->
     };
 parse_line(State=#state{}, <<"INFO CODE_ID ", CodeId/binary>>) ->
     State#state{code_id=CodeId};
-parse_line(State=#state{file_ets=Ets}, <<"FILE ", FileData/binary>>) ->
+parse_line(State=#state{public_syms_only=false, file_ets=Ets}, <<"FILE ", FileData/binary>>) ->
     [SourceIdBin, Name] = binary:split(FileData, <<" ">>),
     SourceId = binary_to_integer(SourceIdBin),
     ets:insert(Ets, {SourceId, Name}),
     State;
-parse_line(State=#state{func_ets=Ets}, <<"FUNC ", Data/binary>>) ->
+parse_line(State=#state{public_syms_only=false, func_ets=Ets}, <<"FUNC ", Data/binary>>) ->
     [OffsetHex, Data1] = binary:split(Data, <<" ">>),
     [SizeHex, Data2] = binary:split(Data1, <<" ">>),
     [ParamSizeHex, FuncName] = binary:split(Data2, <<" ">>),
@@ -193,19 +201,19 @@ parse_line(State=#state{public_ets=Ets}, <<"PUBLIC ", Data/binary>>) ->
     Offset = binary_to_integer(OffsetHex, 16),
     ets:insert(Ets, #symfile_public{offset=Offset, name=Name}),
     State;
-parse_line(State=#state{stack_ets=Ets}, <<"STACK CFI INIT ", Data/binary>>) ->
+parse_line(State=#state{public_syms_only=false, stack_ets=Ets}, <<"STACK CFI INIT ", Data/binary>>) ->
     [OffsetHex, Data1] = binary:split(Data, <<" ">>),
     [SizeHex, RuleMap] = binary:split(Data1, <<" ">>),
     Offset = binary_to_integer(OffsetHex, 16),
     Size = binary_to_integer(SizeHex, 16),
     ets:insert(Ets, {Offset, Size, RuleMap}),
     State;
-parse_line(State=#state{stack_ets=Ets}, <<"STACK CFI ", Data/binary>>) ->
+parse_line(State=#state{public_syms_only=false, stack_ets=Ets}, <<"STACK CFI ", Data/binary>>) ->
     [OffsetHex, RuleMap] = binary:split(Data, <<" ">>),
     Offset = binary_to_integer(OffsetHex, 16),
     ets:insert(Ets, {Offset, 0, RuleMap}),
     State;
-parse_line(State=#state{func_line_ets=Ets}, Data) when is_binary(Data) ->
+parse_line(State=#state{public_syms_only=false, func_line_ets=Ets}, Data) when is_binary(Data) ->
     % Function lines start with raw hex
     [OffsetHex, SizeHex, LineNumberHex, FileId] = binary:split(
         Data, <<" ">>, [global]
@@ -214,5 +222,8 @@ parse_line(State=#state{func_line_ets=Ets}, Data) when is_binary(Data) ->
     Size = binary_to_integer(SizeHex, 16),
     LineNumber = binary_to_integer(LineNumberHex, 16),
     ets:insert(Ets, {Offset, Size, LineNumber, FileId}),
+    State;
+parse_line(State=#state{public_syms_only=true}, _Data) ->
+    % If we get here, we hit a line we don't care about.
     State.
 
