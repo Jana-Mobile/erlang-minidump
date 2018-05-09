@@ -1,7 +1,7 @@
 -module(minidump_parser).
 -behaviour(gen_server).
 -include_lib("stdlib/include/ms_transform.hrl").
--include("include/records.hrl").
+-include_lib("minidump/include/records.hrl").
 
 -export([
     parse_file/1,

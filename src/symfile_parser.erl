@@ -2,7 +2,7 @@
 -compile(export_all).
 -behaviour(gen_server).
 -include_lib("stdlib/include/ms_transform.hrl").
--include("include/records.hrl").
+-include_lib("minidump/include/records.hrl").
 -define(TIMEOUT, 10000).
 
 -export([
