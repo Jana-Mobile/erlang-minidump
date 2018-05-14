@@ -3,7 +3,7 @@
 -behaviour(gen_server).
 -include_lib("stdlib/include/ms_transform.hrl").
 -include_lib("minidump/include/records.hrl").
--define(TIMEOUT, 10000).
+-define(TIMEOUT, 30000).
 
 -export([
     start_link/1,
